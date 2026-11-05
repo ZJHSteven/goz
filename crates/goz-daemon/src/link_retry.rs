@@ -19,6 +19,8 @@ pub(crate) const MAX_PENDING: usize = 8192;
 /// 从首次失败起，指数退避；上限确保临时性问题不会一直不再访问。
 const BASE_DELAY: Duration = Duration::from_millis(250);
 const MAX_DELAY: Duration = Duration::from_secs(60);
+/// 日志不能随高并发 USN 记录每50ms刷屏，只汇总低频告警。
+const WARN_COOLDOWN: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy)]
 struct Retry {
@@ -31,6 +33,7 @@ struct Retry {
 #[derive(Default)]
 pub(crate) struct LinkRetryQueue {
     waiting: BTreeMap<Frn, Retry>,
+    last_warning: Option<Instant>,
 }
 
 impl LinkRetryQueue {
@@ -97,6 +100,18 @@ impl LinkRetryQueue {
     pub(crate) fn clear(&mut self) {
         self.waiting.clear();
     }
+
+    /// 仅首次发现新失败时输出一条聚合警告，错误码样本来自实际 Win32 返回。
+    pub(crate) fn should_warn(&mut self, now: Instant) -> bool {
+        if self
+            .last_warning
+            .is_some_and(|last| now.saturating_duration_since(last) < WARN_COOLDOWN)
+        {
+            return false;
+        }
+        self.last_warning = Some(now);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -155,5 +170,14 @@ mod tests {
         assert_eq!(q.oldest_age(t + Duration::from_secs(120)), Some(Duration::from_secs(120)));
         q.clear();
         assert_eq!(q.oldest_age(t + Duration::from_secs(200)), None);
+    }
+
+    #[test]
+    fn high_volume_failures_do_not_flood_the_service_log() {
+        let mut q = LinkRetryQueue::default();
+        let t = Instant::now();
+        assert!(q.should_warn(t));
+        assert!(!q.should_warn(t + Duration::from_secs(20)));
+        assert!(q.should_warn(t + Duration::from_secs(61)));
     }
 }
