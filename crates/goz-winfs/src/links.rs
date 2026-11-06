@@ -86,12 +86,20 @@ pub fn link_paths(volume: &VolumeHandle, frn: u64) -> Result<Option<Vec<Vec<u16>
     // FindFirstFileNameW needs an openable path, and the index's own path for
     // this FRN is exactly what may be stale (it is why we are reconciling), so
     // ask the filesystem. The GUID form works on a volume with no drive letter.
-    let anchor = final_path(file, VOLUME_NAME_GUID | FILE_NAME_NORMALIZED);
-    // SAFETY: `file` is a live handle this function opened and has not closed.
+    // 不可在 FindFirstFileNameW 之前提前 CloseHandle：
+    // 原代码先把按 FRN 打开的句柄关闭，再用取得的路径重新打开枚举。
+    // 在编译/清理频繁的目录中，最后一条链接可能恰好在两次系统调用
+    // 之间被删除，FRN 记录可能随之释放，导致不必要的枚举失败。
+    // 始终持有原始句柄直到整套硬链接枚举完成，减少这种生命周期竞态。
+    // 这不能消除重命名/权限变更带来的全部竞争，因此 daemon 仍须重试。
+    let result = final_path(file, VOLUME_NAME_GUID | FILE_NAME_NORMALIZED)
+        .and_then(|anchor| walk_links(&anchor));
+    // SAFETY: `file` 是本函数 OpenFileById 成功得到的独占句柄，
+    // 无论读取路径还是枚举链接是否失败，执行到此均恰好关闭一次。
     unsafe {
         CloseHandle(file);
     }
-    walk_links(&anchor?).map(Some)
+    result.map(Some)
 }
 
 /// `GetFinalPathNameByHandleW` into an owned NUL-terminated UTF-16 buffer.
