@@ -1,0 +1,82 @@
+# 仅在独立研究分支生成可验证构建来源，不自动部署到任何计算机。
+# GitHub托管Windows runner使用指定Git提交 + Cargo.lock从源码重新构建，
+# 通过GitHub OIDC/Sigstore签署两个真正生成的EXE。
+name: "goz repair: Windows verified build and attestation"
+
+on:
+  push:
+    branches:
+      - research/goz-v0.7.1-hardlink-repair
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: goz-repair-attest-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  attest-windows:
+    name: Build, test and attest on Windows
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - name: Checkout the exact source revision
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install exact Rust toolchain
+        uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Assert the expected repository and ref
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REPOSITORY -ne 'ZJHSteven/goz') {
+            throw "Unexpected repository; refusing attestation"
+          }
+          if ($env:GITHUB_REF -ne 'refs/heads/research/goz-v0.7.1-hardlink-repair') {
+            throw "Unexpected ref; refusing attestation"
+          }
+          git status --short
+          git rev-parse HEAD
+          rustc --version --verbose
+
+      - name: Rust source formatting
+        run: cargo fmt --all --check
+
+      - name: Strict Rust static checks
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Full test suite
+        run: cargo test --workspace --locked
+
+      - name: Compile release binaries from checked-out source
+        run: cargo build --locked --release -p goz-daemon -p goz-cli
+
+      - name: Record built hashes
+        shell: pwsh
+        run: |
+          Get-FileHash target/release/gozd.exe -Algorithm SHA256
+          Get-FileHash target/release/goz.exe -Algorithm SHA256
+
+      - name: Sign build provenance for both executables
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            target/release/gozd.exe
+            target/release/goz.exe
+
+      - name: Save attested Windows executables for manual verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: goz-repair-win64-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            target/release/gozd.exe
+            target/release/goz.exe
