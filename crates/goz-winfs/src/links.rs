@@ -295,6 +295,46 @@ mod tests {
         assert_eq!(tails, [r"\a\f", r"\b\f", r"\c\f"], "{names:?}");
     }
 
+    /// 高并发硬链接变更不应破坏下一次稳定枚举：
+    /// 一个线程反复增加/删除第二条链接，另一个线程按FRN枚举。
+    /// 在文件变动过程中Windows并不承诺瞬时原子快照，所以允许一次
+    /// 枚举报告错误；变动停止后必须恢复唯一且正确的现存名字。
+    #[test]
+    fn concurrent_hard_link_churn_recovers_the_final_stable_name() {
+        let scratch = Scratch::new("links-churn");
+        let original = scratch.0.join("always-present.txt");
+        let transient = scratch.0.join("temporary-link.txt");
+        std::fs::write(&original, b"NTFS hard-link concurrency").expect("write original");
+        let frn = frn_of(&own_info(&original));
+        let hint = volume_hint(&scratch.0);
+        let writer_original = original.clone();
+        let writer_transient = transient.clone();
+        let writer = std::thread::spawn(move || {
+            for _ in 0..150 {
+                std::fs::hard_link(&writer_original, &writer_transient)
+                    .expect("make transient hard link");
+                std::thread::yield_now();
+                std::fs::remove_file(&writer_transient).expect("remove transient hard link");
+            }
+        });
+        let mut successful_walks = 0usize;
+        for _ in 0..300 {
+            if link_paths(&hint, frn).is_ok() {
+                successful_walks += 1;
+            }
+            std::thread::yield_now();
+        }
+        writer.join().expect("writer survived the churn");
+        assert!(successful_walks > 0, "there should be successful walks during churn");
+        let stable_names = names(
+            &link_paths(&hint, frn)
+                .expect("the stable file enumerates")
+                .expect("the original FRN still exists"),
+        );
+        assert_eq!(stable_names.len(), 1, "{stable_names:?}");
+        assert!(stable_names[0].ends_with(r"\always-present.txt"), "{stable_names:?}");
+    }
+
     /// Only a file ID that no longer opens proves a file gone: deleted, or
     /// its record now holds a newer file.
     #[test]
