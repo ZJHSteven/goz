@@ -425,6 +425,8 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                         columns = ColumnBuilder::default();
                         start_usn = c.next_usn;
                         journal_id = c.journal_id;
+                        pending_links.clear();
+                        state.pending_link_reconciles.store(0, Ordering::Release);
                         failing_since = None;
                         backoff = RETRY_BACKOFF_MIN;
                         degraded = false;
@@ -459,6 +461,8 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                         columns = ColumnBuilder::default();
                         start_usn = c.next_usn;
                         journal_id = c.journal_id;
+                        pending_links.clear();
+                        state.pending_link_reconciles.store(0, Ordering::Release);
                         failing_since = None;
                         backoff = RETRY_BACKOFF_MIN;
                         degraded = false;
@@ -504,6 +508,8 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                             columns = ColumnBuilder::default();
                             start_usn = c.next_usn;
                             journal_id = c.journal_id;
+                            pending_links.clear();
+                            state.pending_link_reconciles.store(0, Ordering::Release);
                             failing_since = None;
                             backoff = RETRY_BACKOFF_MIN;
                             degraded = false;
