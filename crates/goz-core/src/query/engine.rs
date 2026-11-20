@@ -2710,9 +2710,9 @@ impl FolderPaths {
     ) -> bool {
         let folder = index.entry(idx).parent();
         // The entry's own walk is one entry longer than its folder's.
-        if !self
+        if self
             .load(index, folder)
-            .is_some_and(|depth| (depth as usize) < MAX_PATH_HOPS)
+            .is_none_or(|depth| (depth as usize) >= MAX_PATH_HOPS)
         {
             return false;
         }
