@@ -61,6 +61,12 @@ pub(crate) struct VolumeState {
     /// the index even before the journal can be read, from a rebuild, which
     /// waits for the journal.
     pub indexed: AtomicBool,
+    /// 仍等待硬链接名称集合核对的唯一 NTFS 文件记录数。
+    ///
+    /// 索引写线程在锁内发布此原子值；读取方在同一索引读锁内观察，
+    /// 防止已经更新索引却仍报告「完全可信」的短暂并发窗口。
+    /// 注意与历史累计失败计数不同：成功修复或可靠重建后归零。
+    pub pending_link_reconciles: AtomicU64,
     /// Memoized `-path` scope resolution (case-insensitive queries only).
     pub scope_cache: Mutex<Option<ScopeCache>>,
     /// The index generation as of the last change published to watchers,
@@ -96,6 +102,7 @@ impl VolumeState {
             metadata_pending: RwLock::new(false),
             journal_max_bytes: RwLock::new(None),
             indexed: AtomicBool::new(false),
+            pending_link_reconciles: AtomicU64::new(0),
             scope_cache: Mutex::new(None),
             published_generation: AtomicU64::new(0),
             column_build: Mutex::new(ColumnBuild::default()),

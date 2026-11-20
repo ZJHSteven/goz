@@ -22,6 +22,8 @@ mod folder_sizes;
 #[cfg(windows)]
 mod local_clock;
 #[cfg(windows)]
+mod link_retry;
+#[cfg(windows)]
 mod pulse;
 #[cfg(windows)]
 mod run;
