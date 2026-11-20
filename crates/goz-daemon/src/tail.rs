@@ -43,6 +43,7 @@ use goz_winfs::{
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::bootstrap::{self, JournalSetup};
+use crate::link_retry::LinkRetryQueue;
 use crate::pulse::TailPulse;
 use crate::volume_state::{ColumnBuild, VolumeState};
 
@@ -85,6 +86,10 @@ pub(crate) const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// journal. Every ask that fails logs a line, so a disk that never comes back
 /// costs a dozen lines an hour rather than one every 30 s.
 const JOURNAL_WAIT_MAX: Duration = Duration::from_secs(5 * 60);
+/// 某条硬链接名称持续无法被证明正确时，尝试一次 MFT 全量重建。
+const LINK_REPAIR_RESCAN_AFTER: Duration = Duration::from_secs(120);
+/// 避免一个不可访问的文件让整个卷每两分钟就重建一次。
+const LINK_REPAIR_RESCAN_COOLDOWN: Duration = Duration::from_secs(30 * 60);
 /// Consecutive rescans before giving up and marking the volume Failed: a storm
 /// guard so a persistently broken journal cannot spin on rebuilds forever. Reset
 /// after any healthy batch.
@@ -230,8 +235,43 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
     let mut backoff = RETRY_BACKOFF_MIN;
     let mut degraded = false;
     let mut columns = ColumnBuilder::default();
+    let mut pending_links = LinkRetryQueue::default();
+    let mut next_link_rescan = Instant::now() + LINK_REPAIR_RESCAN_AFTER;
 
     while !stop.load(Ordering::Relaxed) {
+        // 即使USN日志安静，没有新增文件变化，也必须继续处理待办。
+        // 若一个文件一直无法核对，不能只显示 Live 并永久保留旧名字。
+        if pending_links
+            .oldest_age(Instant::now())
+            .is_some_and(|age| age >= LINK_REPAIR_RESCAN_AFTER)
+            && Instant::now() >= next_link_rescan
+        {
+            tracing::warn!(
+                volume = %state.mount_prefix(),
+                pending = pending_links.len(),
+                "hard-link repair timed out; rebuilding MFT index"
+            );
+            next_link_rescan = Instant::now() + LINK_REPAIR_RESCAN_COOLDOWN;
+            match bounded_rescan(
+                state,
+                handle,
+                pulse,
+                RescanReason::HardLinkReconcileUnresolved,
+                "hard-link names remained unresolved",
+                &mut rescans,
+                stop,
+            ) {
+                Some(c) => {
+                    columns = ColumnBuilder::default();
+                    start_usn = c.next_usn;
+                    journal_id = c.journal_id;
+                    pending_links.clear();
+                    state.pending_link_reconciles.store(0, Ordering::Release);
+                    continue;
+                }
+                None => return,
+            }
+        }
         // Liveness stamp for the supervisor: as long as this loop is turning,
         // however unhealthily, no one cancels our I/O.
         pulse.beat();
@@ -271,6 +311,8 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                                 columns = ColumnBuilder::default();
                                 start_usn = c.next_usn;
                                 journal_id = c.journal_id;
+                                pending_links.clear();
+                                state.pending_link_reconciles.store(0, Ordering::Release);
                                 continue;
                             }
                             None => return,
@@ -281,6 +323,7 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                     // Caught up (or only filtered-out records): advance and idle,
                     // unless a column is building.
                     start_usn = walk.next_usn;
+                    attempt_due_link_repairs(state, handle, &mut pending_links, stop, pulse);
                     if !columns.building() {
                         std::thread::sleep(IDLE_POLL);
                     }
@@ -302,9 +345,24 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                 reserve_room(state, Room::for_records(&walk.records));
                 // The batch moves the generation, which the guard publishes
                 // to watchers as it drops.
-                let outcome = {
+                let (outcome, to_reconcile) = {
                     let mut index = state.write_index();
-                    index.apply_batch(&walk.records)
+                    let outcome = index.apply_batch(&walk.records);
+                    // 同批 LINK_DIRTY 后的 FILE_DELETE 是权威终态：
+                    // 旧 FRN 不能因为前面的变更记录重新进入待办队列。
+                    let (deleted, relevant) =
+                        link_dirties_after_deletes(&walk.records, &outcome.needs_link_reconcile);
+                    for frn in &deleted {
+                        pending_links.resolved(*frn);
+                    }
+                    let count = if pending_links.mark_dirty(&relevant, Instant::now()).is_ok() {
+                        pending_links.len() as u64
+                    } else {
+                        // 队列超限必须「失败闭合」，绝不能默默丢掉FRN并报完整。
+                        u64::MAX
+                    };
+                    state.pending_link_reconciles.store(count, Ordering::Release);
+                    (outcome, relevant)
                 };
                 for anomaly in &outcome.anomalies {
                     tracing::debug!(volume = %state.mount_prefix(), ?anomaly, "index anomaly");
@@ -322,7 +380,23 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                 // A hard-link change also alters the file's NAMES, which no stat
                 // can refresh and which the record itself cannot be trusted for
                 // (it may name a link that is already dead).
-                reconcile_links(state, handle, &outcome.needs_link_reconcile, stop, pulse);
+                if !attempt_link_repairs(
+                    state,
+                    handle,
+                    &mut pending_links,
+                    &to_reconcile,
+                    stop,
+                    pulse,
+                    true,
+                ) {
+                    mark_failed(
+                        state,
+                        RescanReason::HardLinkReconcileUnresolved,
+                        "too many unresolved hard-link records; full rebuild required",
+                    );
+                    return;
+                }
+                attempt_due_link_repairs(state, handle, &mut pending_links, stop, pulse);
                 if outcome.wants_merge {
                     merge_names(state);
                 }
