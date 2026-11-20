@@ -6837,8 +6837,9 @@ mod tests {
                 // `exe:` alone: its extensions, and an empty term, which
                 // under `whole:` matches nothing.
                 L::Macro => {
-                    !(ctx.whole == Some(true) || (ctx.start == Some(true) && ctx.end == Some(true)))
-                        && !e.is_dir
+                    !(ctx.whole == Some(true)
+                        || e.is_dir
+                        || (ctx.start == Some(true) && ctx.end == Some(true)))
                         && fold_str(&e.name).rsplit_once('.').is_some_and(|(_, x)| {
                             [
                                 "bat", "cmd", "exe", "msi", "msp", "msu", "ps1", "scr", "vbs",
