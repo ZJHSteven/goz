@@ -1543,6 +1543,7 @@ mod tests {
             metadata_pending: RwLock::new(true),
             journal_max_bytes: RwLock::new(None),
             indexed: AtomicBool::new(false),
+            pending_link_reconciles: std::sync::atomic::AtomicU64::new(0),
             scope_cache: Mutex::new(Some(ScopeCache {
                 rel: b"windows".to_vec(),
                 entry: 1,
@@ -1661,7 +1662,7 @@ mod tests {
             &[(f1, f1_links.as_slice()), (f2, f2_links.as_slice())],
         );
 
-        assert_eq!(dropped, 0);
+        assert!(dropped.is_empty());
         let f2_entry = index.entry(index.head_of(f2).expect("f2 is indexed"));
         assert_eq!(index.entry(f2_entry.parent()).frn(), d_new);
         let mut path = Vec::new();
@@ -1743,7 +1744,7 @@ mod tests {
             ],
         );
 
-        assert_eq!(dropped, 0);
+        assert!(dropped.is_empty());
         let mut link = index.head_of(file).expect("the file is indexed");
         let mut paths = Vec::new();
         while link != goz_core::types::NIL {
@@ -1767,7 +1768,7 @@ mod tests {
             &mut index,
             &[(file, links.as_slice()), (file, links.as_slice())],
         );
-        assert_eq!(dropped, 1);
+        assert_eq!(dropped.len(), 1);
     }
 
     /// A rescan publishes the flags of the index it built, not the ones its

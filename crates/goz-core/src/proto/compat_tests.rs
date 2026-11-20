@@ -332,6 +332,7 @@ fn status(columns: Vec<ColumnStatus>) -> DaemonStatus {
             link_reconciles_dropped: 0,
             memory: Some(VolumeMemory::default()),
             columns,
+            link_reconciles_pending: 0,
         }],
         volumes_incomplete: false,
         process_working_set: 1,

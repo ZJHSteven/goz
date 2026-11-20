@@ -1731,6 +1731,7 @@ mod tests {
             metadata_pending: RwLock::new(false),
             journal_max_bytes: RwLock::new(None),
             indexed: AtomicBool::new(true),
+            pending_link_reconciles: std::sync::atomic::AtomicU64::new(0),
             scope_cache: Mutex::new(None),
             published_generation: std::sync::atomic::AtomicU64::new(0),
             column_build: Mutex::new(Default::default()),
