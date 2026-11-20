@@ -361,7 +361,9 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                         // 队列超限必须「失败闭合」，绝不能默默丢掉FRN并报完整。
                         u64::MAX
                     };
-                    state.pending_link_reconciles.store(count, Ordering::Release);
+                    state
+                        .pending_link_reconciles
+                        .store(count, Ordering::Release);
                     (outcome, relevant)
                 };
                 for anomaly in &outcome.anomalies {
@@ -1654,12 +1656,14 @@ mod tests {
         ];
         let mut index = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
         let outcome = index.apply_batch(&events);
-        let (deleted, active) =
-            link_dirties_after_deletes(&events, &outcome.needs_link_reconcile);
+        let (deleted, active) = link_dirties_after_deletes(&events, &outcome.needs_link_reconcile);
         assert!(deleted.contains(&gone));
         assert_eq!(active, vec![still_live]);
         let mut queue = LinkRetryQueue::default();
-        assert_eq!(queue.mark_dirty(&active, Instant::now()), Ok(vec![still_live]));
+        assert_eq!(
+            queue.mark_dirty(&active, Instant::now()),
+            Ok(vec![still_live])
+        );
     }
 
     /// 父目录稍后才进入索引的场景：失败不得使用半套链接删掉旧名；

@@ -122,7 +122,10 @@ mod tests {
     fn deduplicates_same_frn_in_one_usn_batch() {
         let mut q = LinkRetryQueue::default();
         let t = Instant::now();
-        assert_eq!(q.mark_dirty(&[Frn(7), Frn(7), Frn(8)], t), Ok(vec![Frn(7), Frn(8)]));
+        assert_eq!(
+            q.mark_dirty(&[Frn(7), Frn(7), Frn(8)], t),
+            Ok(vec![Frn(7), Frn(8)])
+        );
         assert_eq!(q.len(), 2);
     }
 
@@ -167,7 +170,10 @@ mod tests {
         let t = Instant::now();
         q.mark_dirty(&[Frn(9)], t).unwrap();
         q.failed(Frn(9), t + Duration::from_secs(60));
-        assert_eq!(q.oldest_age(t + Duration::from_secs(120)), Some(Duration::from_secs(120)));
+        assert_eq!(
+            q.oldest_age(t + Duration::from_secs(120)),
+            Some(Duration::from_secs(120))
+        );
         q.clear();
         assert_eq!(q.oldest_age(t + Duration::from_secs(200)), None);
     }

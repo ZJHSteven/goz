@@ -565,8 +565,7 @@ mod tests {
         assert!(hit("content:here", "ansi.txt"));
         if decoded_ansi.contains("résumé") {
             assert!(
-                hit("content:resume", "ansi.txt")
-                    && hit("content:r\u{e9}sum\u{e9}", "ansi.txt")
+                hit("content:resume", "ansi.txt") && hit("content:r\u{e9}sum\u{e9}", "ansi.txt")
             );
         }
         assert!(hit("content:widechar", "w16.txt"));

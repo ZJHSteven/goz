@@ -659,7 +659,10 @@ fn stream_query_binary(
         let index = vol.index.read();
         // 与上游唯一的USN索引写线程共用同一把索引读写锁：
         // 「应用新名字」与「标记待修复」不能跨越查询的同步边界。
-        if vol.pending_link_reconciles.load(std::sync::atomic::Ordering::Acquire) > 0
+        if vol
+            .pending_link_reconciles
+            .load(std::sync::atomic::Ordering::Acquire)
+            > 0
             || index.has_orphans()
             || index.has_parent_cycle()
         {
@@ -1251,7 +1254,9 @@ fn all_volumes_live(volumes: &VolumeSet) -> bool {
             return false;
         }
         let index = v.index.read();
-        v.pending_link_reconciles.load(std::sync::atomic::Ordering::Acquire) == 0
+        v.pending_link_reconciles
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
             && !index.has_orphans()
             && !index.has_parent_cycle()
     })
@@ -1268,7 +1273,9 @@ fn build_status(volumes: &VolumeSet) -> DaemonStatus {
             }
             let index = v.index.read();
             let stats = index.stats();
-            if v.pending_link_reconciles.load(std::sync::atomic::Ordering::Acquire) > 0
+            if v.pending_link_reconciles
+                .load(std::sync::atomic::Ordering::Acquire)
+                > 0
                 || index.has_orphans()
                 || index.has_parent_cycle()
             {
@@ -1984,9 +1991,7 @@ mod tests {
         bad.pending_link_reconciles
             .store(0, std::sync::atomic::Ordering::Release);
         assert!(!build_status(&vols).volumes_incomplete);
-        assert!(
-            !results(&encode_query_binary(&vols, query("System32")))[0].volumes_incomplete
-        );
+        assert!(!results(&encode_query_binary(&vols, query("System32")))[0].volumes_incomplete);
         let Response::Hello { ready, .. } = handle_request(&vols, hello_request(1, 1)) else {
             panic!("must negotiate")
         };
