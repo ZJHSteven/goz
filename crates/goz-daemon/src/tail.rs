@@ -745,17 +745,30 @@ fn reserve_room(state: &VolumeState, room: Room) {
 /// An FRN whose walk fails is SKIPPED, never reconciled to an empty set:
 /// `reconcile_links` treats empty as a delete, so a failed walk would
 /// otherwise erase a live file from the index.
+#[derive(Default)]
+struct LinkRepairReport {
+    /// 每个失败FRN只出现一次，供延迟重试。顺序不影响结果。
+    failed: FxHashSet<Frn>,
+    /// 仅记录本轮首个Win32错误的API与错误码，不输出私人路径。
+    win32_error: Option<(&'static str, u32)>,
+    /// 即使操作系统枚举成功，也可能因某个父目录尚未入库而无法应用。
+    missing_parent: usize,
+    /// OpenFileById报告记录不存在，但索引中仍保存旧文件名。
+    gone_but_indexed: usize,
+}
+
 fn reconcile_links(
     state: &VolumeState,
     handle: &VolumeHandle,
     frns: &[Frn],
     stop: &AtomicBool,
     pulse: &TailPulse,
-) {
+    first_attempt: bool,
+) -> LinkRepairReport {
     if frns.is_empty() {
-        return;
+        return LinkRepairReport::default();
     }
-    let mut dropped = 0u64;
+    let mut report = LinkRepairReport::default();
     // Reason bits accumulate over an open-close window, so one hard-link
     // change is listed once per record of its window: walk each file once.
     let walks = walk_each_once(frns, |frn| {
@@ -771,23 +784,38 @@ fn reconcile_links(
         pulse.beat();
         ControlFlow::Continue(match goz_winfs::link_paths(handle, frn.0) {
             Ok(Some(l)) if !l.is_empty() => Some(l),
-            // Gone: its delete record removes it. (A walk always holds the
-            // name it started from, so an empty set never reaches here.)
-            Ok(_) => None,
+            // 不能简单把「MFT记录已消失」视为核对成功：
+            // 如果索引里仍留着旧名字，等待权威FILE_DELETE或完整重建。
+            Ok(_) => {
+                if state.index.read().head_of(frn).is_some() {
+                    report.gone_but_indexed += 1;
+                    report.failed.insert(frn);
+                }
+                None
+            }
             Err(e) => {
-                tracing::debug!(volume = %state.mount_prefix(), frn = frn.0, error = %e, "link walk failed");
-                dropped += 1;
+                report.failed.insert(frn);
+                report.win32_error.get_or_insert((e.context, e.code));
+                tracing::debug!(
+                    volume = %state.mount_prefix(),
+                    frn = frn.0,
+                    api = e.context,
+                    win32_code = e.code,
+                    "link walk failed; scheduled for retry"
+                );
                 None
             }
         })
     });
     let ControlFlow::Continue(walks) = walks else {
-        return;
+        // 正在退出，剩余FRN不宣告成功。服务重新开始时从MFT重建。
+        report.failed.extend(frns.iter().copied());
+        return report;
     };
     let walked = in_batch_order(frns, &walks);
 
-    if walked.is_empty() && dropped == 0 {
-        return;
+    if walked.is_empty() && report.failed.is_empty() {
+        return report;
     }
     reserve_room(
         state,
@@ -799,15 +827,17 @@ fn reconcile_links(
         ),
     );
     let mut index = state.write_index();
-    dropped += apply_link_walks(&mut index, &walked);
+    let parents_unresolved = apply_link_walks(&mut index, &walked);
+    report.missing_parent = parents_unresolved.len();
+    report.failed.extend(parents_unresolved);
     if !walked.is_empty() {
         index.note_changed();
     }
-    if dropped > 0 {
-        // Not silent: a reconcile we could not perform means names on this
-        // volume may be stale until the next rescan, and `--status` says so.
-        index.note_link_reconciles_dropped(dropped);
+    if first_attempt && !report.failed.is_empty() {
+        // 旧计数继续保留作历史诊断，但重试不反复把同一FRN计为新故障。
+        index.note_link_reconciles_dropped(report.failed.len() as u64);
     }
+    report
 }
 
 /// A file's hard links, as volume-relative UTF-16 paths.
@@ -850,7 +880,7 @@ fn in_batch_order<'a>(
 /// Returns how many FRNs were left unreconciled because a folder is not
 /// indexed, each counted once: reconciling to a partial set would delete the
 /// links it could not resolve.
-fn apply_link_walks(index: &mut VolumeIndex, walked: &[(Frn, &[Vec<u16>])]) -> u64 {
+fn apply_link_walks(index: &mut VolumeIndex, walked: &[(Frn, &[Vec<u16>])]) -> FxHashSet<Frn> {
     let mut unreconciled = FxHashSet::default();
     'walks: for &(frn, links) in walked {
         let mut targets = Vec::with_capacity(links.len());
@@ -872,8 +902,10 @@ fn apply_link_walks(index: &mut VolumeIndex, walked: &[(Frn, &[Vec<u16>])]) -> u
             continue;
         }
         index.reconcile_links(frn, &targets);
+        // 同批次稍后的重试成功时，撤销该FRN先前的暂时失败。
+        unreconciled.remove(&frn);
     }
-    unreconciled.len() as u64
+    unreconciled
 }
 
 /// Splits a volume-relative path into (parent dir, file name) at the last
