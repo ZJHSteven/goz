@@ -325,14 +325,20 @@ mod tests {
             std::thread::yield_now();
         }
         writer.join().expect("writer survived the churn");
-        assert!(successful_walks > 0, "there should be successful walks during churn");
+        assert!(
+            successful_walks > 0,
+            "there should be successful walks during churn"
+        );
         let stable_names = names(
             &link_paths(&hint, frn)
                 .expect("the stable file enumerates")
                 .expect("the original FRN still exists"),
         );
         assert_eq!(stable_names.len(), 1, "{stable_names:?}");
-        assert!(stable_names[0].ends_with(r"\always-present.txt"), "{stable_names:?}");
+        assert!(
+            stable_names[0].ends_with(r"\always-present.txt"),
+            "{stable_names:?}"
+        );
     }
 
     /// Only a file ID that no longer opens proves a file gone: deleted, or
