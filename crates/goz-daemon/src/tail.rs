@@ -535,6 +535,88 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
     }
 }
 
+/// 筛除同一USN批次已经明确 FILE_DELETE 的FRN；
+/// 只有最终仍存活的文件才需要再次枚举其所有名字。
+fn link_dirties_after_deletes(
+    records: &[goz_core::usn::record::ParsedUsnRecord],
+    dirty: &[Frn],
+) -> (FxHashSet<Frn>, Vec<Frn>) {
+    let deleted: FxHashSet<_> = records
+        .iter()
+        .filter(|r| r.reason & USN_REASON_FILE_DELETE != 0)
+        .map(|r| r.frn)
+        .collect();
+    // 保留官方0.7.1原始应用顺序及重复项：同批次晚出现的目录
+    // 可能令先前解析失败的链接在下一次应用时自行恢复。
+    let active = dirty
+        .iter()
+        .copied()
+        .filter(|frn| !deleted.contains(frn))
+        .collect();
+    (deleted, active)
+}
+
+/// 首次处理或重试失败的FRN；底层仍沿用官方按FRN只枚举一次的优化，
+/// 并按USN原顺序重复应用，以免回归上游的父目录记录复用问题。
+fn attempt_link_repairs(
+    state: &VolumeState,
+    handle: &VolumeHandle,
+    queue: &mut LinkRetryQueue,
+    frns: &[Frn],
+    stop: &AtomicBool,
+    pulse: &TailPulse,
+    first_attempt: bool,
+) -> bool {
+    if first_attempt && queue.mark_dirty(frns, Instant::now()).is_err() {
+        return false;
+    }
+    if frns.is_empty() {
+        return true;
+    }
+    let report = reconcile_links(state, handle, frns, stop, pulse, first_attempt);
+    // 原始frns可以含同一文件的多条USN记录。每个FRN的失败次数只加一次。
+    let unique: FxHashSet<Frn> = frns.iter().copied().collect();
+    for frn in unique {
+        if report.failed.contains(&frn) {
+            queue.failed(frn, Instant::now());
+        } else {
+            queue.resolved(frn);
+        }
+    }
+    state
+        .pending_link_reconciles
+        .store(queue.len() as u64, Ordering::Release);
+    // INFO级日志直接报告底层错误码，但限制到每卷每分钟一条，
+    // 避免重试循环产生成千上万条日志；故障仍可追踪。
+    if first_attempt && !report.failed.is_empty() && queue.should_warn(Instant::now()) {
+        tracing::warn!(
+            volume = %state.mount_prefix(),
+            failed_frns = report.failed.len(),
+            pending_frns = queue.len(),
+            win32_api = report.win32_error.map_or("none", |(api, _)| api),
+            win32_code = report.win32_error.map_or(0, |(_, code)| code),
+            missing_parent = report.missing_parent,
+            gone_but_indexed = report.gone_but_indexed,
+            "hard-link reconciliation incomplete; scheduling automatic repair"
+        );
+    }
+    true
+}
+
+/// 对没有新USN事件的安静卷同样持续重试，避免「文件不再变化就永远不修」。
+fn attempt_due_link_repairs(
+    state: &VolumeState,
+    handle: &VolumeHandle,
+    queue: &mut LinkRetryQueue,
+    stop: &AtomicBool,
+    pulse: &TailPulse,
+) {
+    let due = queue.due(Instant::now());
+    if !due.is_empty() {
+        let _ = attempt_link_repairs(state, handle, queue, &due, stop, pulse, false);
+    }
+}
+
 /// The build of optional columns switched on while the volume is live: a
 /// FILE_LAYOUT pass of its own, on a volume handle of its own (so the
 /// tail's handle keeps no enumeration of it), asking for the info entries
