@@ -518,8 +518,9 @@ mod tests {
 
     /// Files written to disk and read back through Windows: the null filter
     /// `.bin` has (read from the registry) gives no text, a file of no
-    /// filter is searched as bytes, the ANSI code page reads an accent
-    /// (é is 0xE9 in every Western and Turkish code page), and a cloud file
+    /// filter is searched as bytes, the ANSI code page reads text using the
+    /// machine's real ACP (Windows in China often uses GBK/CP936 rather than
+    /// Western CP1252, where a single 0xE9 means é), and a cloud file
     /// not on the disk, here an offline one, is not read.
     #[test]
     fn files_are_read_through_windows_as_everything_reads_them() {
@@ -556,7 +557,18 @@ mod tests {
         assert!(!hit("content:needle", "b.bin"), "the null filter");
         assert!(hit("ansicontent:needle", "b.bin"));
         assert!(hit("content:needle", "b.dat") && hit("content:wneedle", "b.dat"));
-        assert!(hit("content:resume", "ansi.txt") && hit("content:r\u{e9}sum\u{e9}", "ansi.txt"));
+        // 原上游测试无条件把0xE9当成é，在中文Windows的CP936上并不成立。
+        // 验证文本应与应用实际调用的MultiByteToWideChar(CP_ACP)一致；
+        // 西欧ACP继续验证带音标与忽略音标查询，其他ACP验证ASCII尾段。
+        let mut decoded_ansi = String::new();
+        goz_winfs::ansi_to_string(b"r\xe9sum\xe9 here\n", &mut decoded_ansi);
+        assert!(hit("content:here", "ansi.txt"));
+        if decoded_ansi.contains("résumé") {
+            assert!(
+                hit("content:resume", "ansi.txt")
+                    && hit("content:r\u{e9}sum\u{e9}", "ansi.txt")
+            );
+        }
         assert!(hit("content:widechar", "w16.txt"));
         assert!(hit("content:needle", "off.txt"));
         assert!(!hit("content:needle", "missing.txt"));
