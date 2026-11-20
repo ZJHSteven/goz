@@ -657,6 +657,14 @@ fn stream_query_binary(
         // concurrent rescan cannot swap the index between the two steps.
         let waiting = Instant::now();
         let index = vol.index.read();
+        // 与上游唯一的USN索引写线程共用同一把索引读写锁：
+        // 「应用新名字」与「标记待修复」不能跨越查询的同步边界。
+        if vol.pending_link_reconciles.load(std::sync::atomic::Ordering::Acquire) > 0
+            || index.has_orphans()
+            || index.has_parent_cycle()
+        {
+            volumes_incomplete = true;
+        }
         timing.lock_wait += waiting.elapsed();
         let matching = Instant::now();
         let budget = Budget::until(matching + search_budget, cancel);
@@ -1238,7 +1246,15 @@ fn hello(volumes: &VolumeSet, proto_min: u16, proto_max: u16) -> Response {
 /// [`DaemonStatus::volumes_incomplete`] applies, so `Hello.ready` and a `Status`
 /// reply can never disagree about whether the index is whole.
 fn all_volumes_live(volumes: &VolumeSet) -> bool {
-    volumes.iter().all(|v| v.phase.read().is_complete())
+    volumes.iter().all(|v| {
+        if !v.phase.read().is_complete() {
+            return false;
+        }
+        let index = v.index.read();
+        v.pending_link_reconciles.load(std::sync::atomic::Ordering::Acquire) == 0
+            && !index.has_orphans()
+            && !index.has_parent_cycle()
+    })
 }
 
 fn build_status(volumes: &VolumeSet) -> DaemonStatus {
@@ -1252,6 +1268,12 @@ fn build_status(volumes: &VolumeSet) -> DaemonStatus {
             }
             let index = v.index.read();
             let stats = index.stats();
+            if v.pending_link_reconciles.load(std::sync::atomic::Ordering::Acquire) > 0
+                || index.has_orphans()
+                || index.has_parent_cycle()
+            {
+                incomplete = true;
+            }
             let mem = index.memory();
             let build = *v.column_build.lock();
             let columns = index
@@ -1288,6 +1310,9 @@ fn build_status(volumes: &VolumeSet) -> DaemonStatus {
                 delete_of_unknown: stats.delete_of_unknown,
                 stale_slots: stats.stale_slots,
                 link_reconciles_dropped: stats.link_reconciles_dropped,
+                link_reconciles_pending: v
+                    .pending_link_reconciles
+                    .load(std::sync::atomic::Ordering::Acquire),
                 memory: Some(VolumeMemory {
                     entries: pair(mem.entries),
                     arena_raw: pair(mem.arena_raw),
