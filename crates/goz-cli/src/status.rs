@@ -64,10 +64,17 @@ fn volume(out: &mut String, v: &VolumeStatus) {
     // Drift counters, shown only when non-zero. These are the only outward
     // sign that the index and the volume have diverged, so reporting them
     // nowhere made a drifting index indistinguishable from a healthy one.
+    if v.link_reconciles_pending > 0 {
+        let _ = writeln!(
+            out,
+            "           {} hard-link record(s) pending repair: results may be incomplete",
+            v.link_reconciles_pending
+        );
+    }
     if v.link_reconciles_dropped > 0 {
         let _ = writeln!(
             out,
-            "           {} hard-link change(s) not reconciled: some names may be stale",
+            "           {} historical hard-link reconcile failure(s) (cumulative)",
             v.link_reconciles_dropped
         );
     }
@@ -148,6 +155,7 @@ mod tests {
             delete_of_unknown: 0,
             stale_slots: 0,
             link_reconciles_dropped: 0,
+            link_reconciles_pending: 0,
             memory: None,
             columns: Vec::new(),
         }

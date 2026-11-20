@@ -532,6 +532,10 @@ pub struct VolumeStatus {
     /// daemon predating the field.
     #[serde(default)]
     pub columns: Vec<ColumnStatus>,
+    /// 当前仍需重新核对名字的唯一 FRN 数；不同于上面的历史累计失败次数。
+    /// 成功修复或者全量 MFT 重建后应归零；旧版状态消息没有此字段。
+    #[serde(default)]
+    pub link_reconciles_pending: u64,
 }
 
 /// One optional column of a volume's index.
@@ -877,6 +881,7 @@ mod tests {
                 delete_of_unknown: 2 * i as u64,
                 stale_slots: 3 * i as u64,
                 link_reconciles_dropped: 4 * i as u64,
+                link_reconciles_pending: 5 * i as u64,
                 memory: Some(VolumeMemory {
                     entries: MemPair {
                         used: 10 * i as u64,
