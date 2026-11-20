@@ -1956,6 +1956,43 @@ mod tests {
         assert!(ready, "a snapshot volume is ready to serve");
     }
 
+    /// Live 仅代表USN尾随线程在运行，不能代表每个硬链接已经核对成功。
+    /// 必须让脚本和Agent知道当前是否仍有未修复的名字；历史失败计数
+    /// 则不能在修复完成后继续永久阻止索引报告完整。
+    #[test]
+    fn pending_hard_links_taint_query_status_and_hello_until_repaired() {
+        let bad = live_volume(r"D:\");
+        bad.index.write().note_link_reconciles_dropped(7);
+        bad.pending_link_reconciles
+            .store(2, std::sync::atomic::Ordering::Release);
+        let vols = set(&[live_volume(r"C:\"), bad.clone()]);
+        let status = build_status(&vols);
+        assert!(status.volumes_incomplete);
+        assert_eq!(status.volumes[1].link_reconciles_pending, 2);
+        assert_eq!(status.volumes[1].link_reconciles_dropped, 7);
+        assert!(
+            results(&encode_query_binary(&vols, query("System32")))
+                .iter()
+                .all(|p| p.volumes_incomplete)
+        );
+        let Response::Hello { ready, .. } = handle_request(&vols, hello_request(1, 1)) else {
+            panic!("must negotiate")
+        };
+        assert!(!ready);
+
+        // 模拟后台恢复了所有坏名字，但仍保留可审计的累计历史计数。
+        bad.pending_link_reconciles
+            .store(0, std::sync::atomic::Ordering::Release);
+        assert!(!build_status(&vols).volumes_incomplete);
+        assert!(
+            !results(&encode_query_binary(&vols, query("System32")))[0].volumes_incomplete
+        );
+        let Response::Hello { ready, .. } = handle_request(&vols, hello_request(1, 1)) else {
+            panic!("must negotiate")
+        };
+        assert!(ready);
+    }
+
     /// The honesty bit: any volume whose index is NOT as complete as goz can make
     /// it must mark results incomplete, or the user trusts a partial index.
     #[test]
