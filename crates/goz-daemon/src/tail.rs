@@ -1424,10 +1424,11 @@ fn mark_failed(state: &VolumeState, reason: RescanReason, detail: &str) {
 mod tests {
     use super::{
         DEGRADE_AFTER, ESCALATE_AFTER, JOURNAL_WAIT_MAX, REASON_MASK, RETRY_BACKOFF_MAX,
-        RETRY_BACKOFF_MIN, apply_link_walks, in_batch_order, install, wait_for_journal,
-        walk_each_once,
+        RETRY_BACKOFF_MIN, apply_link_walks, in_batch_order, install, link_dirties_after_deletes,
+        wait_for_journal, walk_each_once,
     };
     use crate::bootstrap::{BuiltIndex, JournalSetup};
+    use crate::link_retry::LinkRetryQueue;
     use crate::pulse::TailPulse;
     use crate::volume_state::{ScopeCache, VolumeState};
     use goz_core::index::{FrnMap, NTFS_ROOT_FRN, VolumeIndex};
@@ -1438,7 +1439,7 @@ mod tests {
     use parking_lot::{Mutex, RwLock};
     use std::ops::ControlFlow;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn record_with(reason: u32) -> ParsedUsnRecord {
         ParsedUsnRecord {
@@ -1635,6 +1636,60 @@ mod tests {
             name: name.as_bytes().to_vec(),
             ..record_with(0)
         }
+    }
+
+    /// 同一批记录先有HARD_LINK_CHANGE后有FILE_DELETE。
+    /// 删除已确定就不应该再把该文件列为未修复，避免永远等待一个已死FRN。
+    #[test]
+    fn a_final_delete_cancels_link_repair_in_the_same_batch() {
+        use goz_core::usn::record::{USN_REASON_FILE_DELETE, USN_REASON_HARD_LINK_CHANGE};
+        let gone = Frn(42);
+        let still_live = Frn(91);
+        let mut other = record_with(USN_REASON_HARD_LINK_CHANGE);
+        other.frn = still_live;
+        let events = [
+            record_with(USN_REASON_HARD_LINK_CHANGE),
+            other,
+            record_with(USN_REASON_FILE_DELETE),
+        ];
+        let mut index = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+        let outcome = index.apply_batch(&events);
+        let (deleted, active) =
+            link_dirties_after_deletes(&events, &outcome.needs_link_reconcile);
+        assert!(deleted.contains(&gone));
+        assert_eq!(active, vec![still_live]);
+        let mut queue = LinkRetryQueue::default();
+        assert_eq!(queue.mark_dirty(&active, Instant::now()), Ok(vec![still_live]));
+    }
+
+    /// 父目录稍后才进入索引的场景：失败不得使用半套链接删掉旧名；
+    /// 下一次核对应修复路径并从pending中移除，而不是永久保留告警。
+    #[test]
+    fn parent_created_after_a_failed_walk_can_repair_all_names() {
+        let root = NTFS_ROOT_FRN;
+        let file = Frn(400);
+        let folder = Frn(401);
+        let mut index = VolumeIndex::new(root, FrnMap::sparse());
+        index.apply_batch(&[created(file, root, "old.txt", false)]);
+        let links = vec![r"\later\real.txt".encode_utf16().collect::<Vec<u16>>()];
+        let walked = [(file, links.as_slice())];
+        let at = Instant::now();
+        let mut queue = LinkRetryQueue::default();
+        queue.mark_dirty(&[file, file], at).unwrap();
+        assert_eq!(apply_link_walks(&mut index, &walked).len(), 1);
+        queue.failed(file, at);
+        assert!(queue.due(at).is_empty());
+        let mut path = Vec::new();
+        index.path_of(index.head_of(file).unwrap(), &mut path);
+        assert_eq!(path, b"old.txt");
+        index.apply_batch(&[created(folder, root, "later", true)]);
+        assert_eq!(queue.due(at + Duration::from_secs(1)), vec![file]);
+        assert!(apply_link_walks(&mut index, &walked).is_empty());
+        queue.resolved(file);
+        assert_eq!(queue.len(), 0);
+        path.clear();
+        index.path_of(index.head_of(file).unwrap(), &mut path);
+        assert_eq!(path, br"later\real.txt");
     }
 
     /// A reconcile can reclaim a record's previous tenant, which may be a
