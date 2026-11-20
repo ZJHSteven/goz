@@ -86,6 +86,9 @@ pub enum RescanReason {
     /// A corrupt buffer or cycle was detected while parsing/applying; we
     /// cannot prove what was missed (daemon-mapped).
     ParserAnomaly,
+    /// 硬链接集合核对长时间不能完成，或者安全重试队列已超限。
+    /// 不能假装仍然完整：须通过全量MFT重建恢复可验证的文件名集合。
+    HardLinkReconcileUnresolved,
     /// The tail started without a journal cursor, so nothing proves the index
     /// is in sync: its supervisor revived it after the previous tail exited,
     /// or bootstrap could not read the journal (daemon-mapped).

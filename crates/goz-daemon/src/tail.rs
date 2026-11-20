@@ -1359,6 +1359,9 @@ fn install(
         let before = index.generation();
         *index = built.index;
         index.continue_generation(before);
+        // 重新安装的是一代全新的MFT索引；旧pending FRN属于上代索引。
+        // 必须在索引写锁内撤销，避免状态读者见到新索引与旧pending混合。
+        state.pending_link_reconciles.store(0, Ordering::Release);
         *state.metadata_pending.write() = built.metadata_pending;
         *state.journal_max_bytes.write() = journal.cursor().map(|c| c.maximum_size);
         state.indexed.store(true, Ordering::Release);
